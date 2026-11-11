@@ -21,6 +21,17 @@ For every API key in `mist_account_transfer.ini`:
      User first. All key owners (from `/self`) are treated as going away, so having
      both your Juniper and Mist accounts as Super User does not count as safe.
      Pending invites are not counted, as they can expire unused.
+   - if such an org is in an **MSP**, the MSP's own Super Users may keep it alive. The
+     *MSP* column names the MSP and the Delete Risk says what was found:
+     - `ONLY LOCAL SUPER USER - ... MSP has N other Super User(s)` (amber): a key is
+       Super User on the MSP, so `GET /msps/{msp_id}/admins` was read; the other
+       MSP-level Super Users are listed in *MSP Super Users*. Check with them
+       before deleting your account(s)
+     - `ONLY SUPER USER - ... MSP has no other Super Users` (red)
+     - `ONLY LOCAL SUPER USER - ... check the MSP's admins` (amber): no key can read
+       the MSP's admins, so check them by hand
+     Only MSP-level Super Users count; the MSP admin list also holds org admins
+     of its orgs, which don't.
    - for those sole-Super-User orgs it also lists the org's **inventory**
      (`GET /orgs/{org_id}/inventory?vc=true` - APs, switches including each Virtual
      Chassis member, gateways, Mist Edges). Mist won't delete an org until its
@@ -46,7 +57,7 @@ dry run too, where orgs that would get an invite show *Would invite (dry run)*:
 
 | Sheet | Contents |
 |---|---|
-| Invitations | Cloud, Org ID, Org Name, Email, Status (Invited / Already admin / Already invited), Level, Delete Risk, Other Super Users, Invited On, Last Checked, Checked With |
+| Invitations | Cloud, Org ID, Org Name, Email, Status (Invited / Already admin / Already invited), Level, Delete Risk, Other Super Users, MSP, MSP Super Users, Invited On, Last Checked, Checked With |
 | Not Super User | Cloud, Org ID, Org Name, Access Level, Key Owner, Last Checked |
 | Inventory to Release | One row per device in a sole-Super-User org: Type, Model, Serial, MAC, Name, Site, Connected, VC MAC. Replaced for each org on every run, so released devices drop off |
 | Licences to Remove | One row per subscription / evaluation / licence move in a sole-Super-User org: Kind, Status, Subscription ID, Type, Order ID, Quantity, Remaining, Start, End, Amendment ID. Replaced per org each run |

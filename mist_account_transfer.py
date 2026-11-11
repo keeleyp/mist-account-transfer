@@ -90,7 +90,19 @@ STATUS_FILLS = {
     "Already invited": PatternFill("solid", fgColor="FFF2CC"),
 }
 RISK_FILL = PatternFill("solid", fgColor="FFC7CE")
+MSP_CHECK_FILL = PatternFill("solid", fgColor="FFEB9C")
 SOLE_RISK = "ONLY SUPER USER - removing your account(s) deletes the org"
+# Every at-risk Delete Risk text starts with "ONLY".
+MSP_OTHERS_RISK = ("ONLY LOCAL SUPER USER - org is in MSP '{msp}', which has {n} other Super User(s): "
+                   "check with them before deleting your account(s)")
+MSP_NONE_RISK = ("ONLY SUPER USER - org is in MSP '{msp}' but the MSP has no other Super Users: "
+                 "removing your account(s) deletes the org")
+MSP_UNKNOWN_RISK = ("ONLY LOCAL SUPER USER - org is in MSP '{msp}': check the MSP's admins "
+                    "before deleting your account(s), the org may not be deleted")
+
+
+def is_at_risk(row):
+    return str(row.get("delete_risk", "")).startswith("ONLY")
 
 # What we invite as: Super Observer = read role + super_observer UI view.
 INVITE_PRIVILEGE = {"scope": "org", "role": "read", "views": ["super_observer"]}
@@ -123,6 +135,8 @@ INVITE_COLUMNS = [
     ("Level", "level"),
     ("Delete Risk", "delete_risk"),
     ("Other Super Users", "other_supers"),
+    ("MSP", "msp"),
+    ("MSP Super Users", "msp_supers"),
     ("Inventory", "inventory"),
     ("Licences", "licences"),
     ("Invited On", "invited_on"),
@@ -373,19 +387,22 @@ def discover_orgs(host, token, self_data):
     the MSP (the MSP privilege is recorded against each org)."""
     orgs = {}
 
-    def add(org_id, name, priv):
-        entry = orgs.setdefault(org_id, {"name": "", "privs": []})
+    def add(org_id, name, priv, msp_id=None, msp_name=None):
+        entry = orgs.setdefault(org_id, {"name": "", "privs": [], "msp_id": "", "msp_name": ""})
         entry["name"] = entry["name"] or name or ""
+        entry["msp_id"] = entry["msp_id"] or msp_id or ""
+        entry["msp_name"] = entry["msp_name"] or msp_name or ""
         entry["privs"].append(priv)
 
     for priv in self_data.get("privileges", []):
         scope = priv.get("scope")
         if scope == "org" and priv.get("org_id"):
-            add(priv["org_id"], priv.get("name") or priv.get("org_name"), priv)
+            add(priv["org_id"], priv.get("name") or priv.get("org_name"), priv,
+                priv.get("msp_id"), priv.get("msp_name"))
         elif scope == "msp" and priv.get("msp_id"):
             msp_priv = dict(priv, msp_name=priv.get("name") or priv.get("msp_name"))
             for org in api_get_all(host, token, f"/msps/{priv['msp_id']}/orgs"):
-                add(org["id"], org.get("name"), msp_priv)
+                add(org["id"], org.get("name"), msp_priv, priv["msp_id"], msp_priv["msp_name"])
         elif scope in ("site", "sitegroup") and priv.get("org_id"):
             add(priv["org_id"], priv.get("org_name"), priv)
     return orgs
@@ -393,6 +410,40 @@ def discover_orgs(host, token, self_data):
 
 def is_super_user(privs):
     return any(p.get("role") == "admin" and p.get("scope") in ("org", "msp") for p in privs)
+
+
+def msp_risk(host, org_id, entry, org_token, msp_keys, cache, own_emails):
+    """Delete Risk / MSP / MSP Super Users for an org with no other local
+    Super User. Reads the MSP's admins when a key is Super User on that MSP."""
+    msp_id = entry["msp_id"]
+    if not msp_id:  # not known from /self - ask the org itself
+        msp_id = api_get(host, org_token, f"/orgs/{org_id}").json().get("msp_id") or ""
+        entry["msp_id"] = msp_id
+    if not msp_id:
+        return {"delete_risk": SOLE_RISK, "msp": "", "msp_supers": ""}
+    msp = entry["msp_name"] or msp_id
+    key = msp_keys.get((host, msp_id))
+    if not key:
+        return {"delete_risk": MSP_UNKNOWN_RISK.format(msp=msp), "msp": msp,
+                "msp_supers": "(can't read - no key is MSP Super User)"}
+    if (host, msp_id) not in cache:
+        try:
+            cache[(host, msp_id)] = api_get_all(host, key[0], f"/msps/{msp_id}/admins")
+        except ApiError as e:
+            if e.status != 403:
+                raise
+            cache[(host, msp_id)] = None
+    admins = cache[(host, msp_id)]
+    if admins is None:
+        return {"delete_risk": MSP_UNKNOWN_RISK.format(msp=msp), "msp": msp,
+                "msp_supers": "(can't read - HTTP 403)"}
+    # The MSP's admin list also holds org-level admins of its orgs - only
+    # MSP-level Super Users keep an org alive across the MSP.
+    others = other_super_users(admins, own_emails, scopes=("msp",))
+    if others:
+        return {"delete_risk": MSP_OTHERS_RISK.format(msp=msp, n=len(others)), "msp": msp,
+                "msp_supers": ", ".join(others)}
+    return {"delete_risk": MSP_NONE_RISK.format(msp=msp), "msp": msp, "msp_supers": "none"}
 
 
 def find_email(admins, email):
@@ -501,7 +552,7 @@ def inventory_summary(rows):
     return f"{len(rows)} (" + ", ".join(f"{n} {t}" for t, n in counts.items()) + ")"
 
 
-def other_super_users(admins, own_emails):
+def other_super_users(admins, own_emails, scopes=("org", "msp")):
     """Emails of accepted Super Users (role admin, org or MSP scope) on the
     org, other than the key owners. Pending invites don't count - they can
     still expire unused."""
@@ -510,7 +561,8 @@ def other_super_users(admins, own_emails):
         email = (a.get("email") or "").strip().lower()
         if not email or email in own_emails or is_pending_invite(a):
             continue
-        if is_super_user(a.get("privileges") or []):
+        if any(p.get("role") == "admin" and p.get("scope") in scopes
+               for p in a.get("privileges") or []):
             others.append(email)
     return sorted(set(others))
 
@@ -557,8 +609,9 @@ def write_sheet(wb, title, columns, rows, status_key=None):
     keys = [k for _, k in columns]
     for r in rows:
         ws.append([r.get(k, "") for _, k in columns])
-        if "delete_risk" in keys and str(r.get("delete_risk", "")).startswith("ONLY"):
-            ws.cell(row=ws.max_row, column=keys.index("delete_risk") + 1).fill = RISK_FILL
+        if "delete_risk" in keys and is_at_risk(r):
+            fill = RISK_FILL if str(r["delete_risk"]).startswith("ONLY SUPER USER") else MSP_CHECK_FILL
+            ws.cell(row=ws.max_row, column=keys.index("delete_risk") + 1).fill = fill
         if status_key:
             fill = STATUS_FILLS.get(str(r.get(status_key, "")).split(" (")[0])
             if fill:
@@ -675,7 +728,9 @@ def main():
 
     # 2. Orgs per key. The same org can be seen by two keys on one cloud
     #    (e.g. Juniper and Mist accounts); a key with Super User wins.
-    orgs = {}  # (host, org_id) -> {"name", "super": [(token, owner)], "access": [(owner, privs)]}
+    orgs = {}  # (host, org_id) -> {"name", "super": [(token, owner)], "access": [(owner, privs)], "msp_id", "msp_name"}
+    msp_keys = {}  # (host, msp_id) -> (token, owner) of a key that is MSP Super User
+    msp_admin_cache = {}
     for host, token, self_data in checked:
         owner = self_data.get("email") or self_data.get("name") or f"...{token[-4:]}"
         label = key_label(host, token, owner)
@@ -690,8 +745,14 @@ def main():
         n_super = sum(is_super_user(o["privs"]) for o in found.values())
         print(f"  {label}: {len(found)} org(s), Super User on {n_super}")
         for org_id, info in found.items():
-            entry = orgs.setdefault((host, org_id), {"name": "", "super": [], "access": []})
+            entry = orgs.setdefault((host, org_id), {"name": "", "super": [], "access": [],
+                                                     "msp_id": "", "msp_name": ""})
             entry["name"] = entry["name"] or info["name"]
+            entry["msp_id"] = entry["msp_id"] or info["msp_id"]
+            entry["msp_name"] = entry["msp_name"] or info["msp_name"]
+            for p in self_data.get("privileges", []):  # keys that can read MSP admins
+                if p.get("scope") == "msp" and p.get("role") == "admin" and p.get("msp_id"):
+                    msp_keys.setdefault((host, p["msp_id"]), (token, owner))
             entry["access"].append((owner, info["privs"]))
             if is_super_user(info["privs"]):
                 entry["super"].append((token, owner))
@@ -753,10 +814,17 @@ def main():
         if others:
             row["delete_risk"] = f"OK - {len(others)} other Super User(s)"
             row["inventory"] = row["licences"] = ""
+            row["msp"] = entry["msp_name"] or entry["msp_id"]
+            row["msp_supers"] = ""
         else:
             # The org would be deleted along with your account - and Mist only
-            # deletes an org once its inventory has been released.
-            row["delete_risk"] = SOLE_RISK
+            # deletes an org once its inventory has been released. If the org
+            # is in an MSP, the MSP's own Super Users may keep it alive.
+            try:
+                row.update(msp_risk(host, org_id, entry, token, msp_keys, msp_admin_cache, own_emails))
+            except ApiError as e:
+                failures.append((f"{host} / {entry['name'] or org_id} (MSP)", str(e)))
+                continue
             try:
                 devices = org_inventory(host, token, org_id, entry["name"], now)
             except ApiError as e:
@@ -805,16 +873,21 @@ def main():
     table_cols = [("Cloud", "cloud"), ("Org Name", "org_name"), ("Org ID", "org_id"),
                   ("Status", "status"), ("Level", "level"), ("Delete Risk", "delete_risk")]
     print_table(f"Super User orgs ({len(invite_rows)})", table_cols, invite_rows)
-    sole = [r for r in invite_rows if r["delete_risk"] == SOLE_RISK]
+    sole = [r for r in invite_rows if is_at_risk(r)]
     if sole:
-        print(f"\n  WARNING: on {len(sole)} org(s) your account(s) are the only Super User. Deleting them")
-        print(f"  would delete the org. Add another Super User first (e.g. promote {INVITE_EMAIL}")
+        print(f"\n  WARNING: on {len(sole)} org(s) your account(s) are the only Super User in the org. Deleting")
+        print(f"  them may delete the org. Add another Super User first (e.g. promote {INVITE_EMAIL}")
         print(f"  once the invite is accepted):")
         for r in sole:
             inv = (f"inventory to release: {r['inventory']}" if r["inventory"] != "none"
                    else "no inventory")
             lic = (f"licences: {r['licences']}" if r["licences"] != "none" else "no licences")
             print(f"    - {r['cloud']}  {r['org_name']}  ({r['org_id']})")
+            if r.get("msp"):
+                supers = r["msp_supers"]
+                msp_line = (f"other MSP Super Users: {supers}" if supers and not supers.startswith("(")
+                            and supers != "none" else f"MSP Super Users: {supers or 'unknown'}")
+                print(f"        in MSP '{r['msp']}' - {msp_line}")
             print(f"        {inv}; {lic}")
         if inventory_rows or licence_rows:
             print(f"  Details are on the '{INVENTORY_SHEET}' and '{LICENCE_SHEET}' sheets "
