@@ -1,0 +1,42 @@
+# API keys to check - one line per Mist cloud: cloud = api_token
+# The cloud can be written as api.eu.mist.com, a short form (eu, gc3, us),
+# or the portal URL (https://manage.eu.mist.com). Tokens only work on the
+# cloud they were made on. If you have more than one account on a cloud
+# (e.g. your Juniper and your Mist account), put both tokens on one line
+# separated by commas. Leave a cloud blank (or delete the line) to skip it.
+[clouds]
+api.mist.com = YOUR_GLOBAL01_TOKEN_HERE
+api.eu.mist.com = YOUR_EU_TOKEN_HERE
+
+gc3 = YOUR_GC3_JUNIPER_TOKEN_HERE, YOUR_GC3_MIST_TOKEN_HERE
+
+[settings]
+# The new account to invite as Super Observer to every org where one of the
+# keys above is Super User. Mist needs a first and last name for an invite.
+invite_email = first.last@hpe.com
+first_name = First
+last_name = Last
+# How long the invite link stays valid, in hours (1-168, Mist's maximum is 7 days).
+invite_hours = 168
+# Spreadsheet to create, or update if it already exists. Relative paths are
+# relative to this ini file's folder.
+output_file = mist_account_transfer.xlsx
+# Optional comma-separated org names or org IDs to leave alone.
+exclude_orgs =
+
+# Optional - only needed if you're behind a TLS-inspecting proxy (e.g.
+# Zscaler). Delete this whole section, or leave the values blank, to use
+# normal system defaults (certifi's CA store, and the HTTP_PROXY /
+# HTTPS_PROXY / NO_PROXY environment variables if set).
+[network]
+# Path to a PEM file with your proxy's root CA certificate (or a bundle
+# that includes it), so TLS verification succeeds against its inspected
+# connections.
+ca_bundle =
+# Only set this to false if you have no way to obtain the proxy's CA
+# certificate. This disables TLS certificate verification entirely.
+verify_ssl = true
+# Explicit proxy overrides - usually unnecessary, since requests already
+# honors HTTP_PROXY / HTTPS_PROXY / NO_PROXY from the environment.
+http_proxy =
+https_proxy =
