@@ -32,6 +32,9 @@ For every API key in `mist_account_transfer.ini`:
      another org and should be returned (unamended) before the org goes. Listed on the
      *Licences to Remove* sheet, summarised in the *Licences* column and the warning.
 3. Orgs where no key is Super User are listed with the access level the key has.
+   This includes orgs where `/self` says Super User but Mist refuses the org's
+   admin list (HTTP 403). That account is really an Org Admin, so the org is listed
+   as Not Super User with a note, and no invite is sent.
 
 The same org seen by two keys (e.g. your Juniper and Mist accounts) is handled
 once; a key with Super User wins.

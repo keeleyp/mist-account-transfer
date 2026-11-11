@@ -175,7 +175,9 @@ TYPE_NAMES = {"ap": "AP", "switch": "switch", "gateway": "gateway", "mxedge": "M
 
 
 class ApiError(Exception):
-    pass
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 # --------------------------------------------------------------------------
@@ -276,7 +278,7 @@ def api_call(method, host, token, path, params=None, body=None):
     if resp.status_code == 401:
         raise ApiError("HTTP 401 - token not valid on this cloud")
     if resp.status_code == 403:
-        raise ApiError(f"HTTP 403 - token has no access to {path}")
+        raise ApiError(f"HTTP 403 - token has no access to {path}", status=403)
     if resp.status_code == 429:
         raise ApiError("HTTP 429 - API rate limit reached (5000 calls/hour), try again later")
     if not resp.ok:
@@ -721,12 +723,29 @@ def main():
                         key=lambda x: (x[0], x[2]["name"].lower()))
     print(f"\nChecking {len(super_orgs)} Super User org(s) for {INVITE_EMAIL} ...")
     for host, org_id, entry in super_orgs:
-        token, owner = entry["super"][0]
-        try:
-            admins = api_get_all(host, token, f"/orgs/{org_id}/admins")
-        except ApiError as e:
-            failures.append((f"{host} / {entry['name'] or org_id}", str(e)))
+        # /self can say role 'admin' for an account that is really only an
+        # org admin: Mist then refuses the admin list (HTTP 403). Such an org
+        # is treated as Not Super User. Try each Super User key in turn.
+        admins, refused, error = None, [], None
+        for token, owner in entry["super"]:
+            try:
+                admins = api_get_all(host, token, f"/orgs/{org_id}/admins")
+                break
+            except ApiError as e:
+                if e.status == 403:
+                    refused.append((token, owner))
+                    continue
+                error = e
+                break
+        if error:
+            failures.append((f"{host} / {entry['name'] or org_id}", str(error)))
             continue
+        if admins is None:
+            entry["super"] = []
+            entry["admin_list_refused"] = True
+            continue
+        token, owner = next(k for k in entry["super"] if k not in refused)
+        entry["super"] = [(token, owner)] + [k for k in entry["super"] if k not in refused and k != (token, owner)]
         row = {"cloud": host, "org_id": org_id, "org_name": entry["name"], "email": INVITE_EMAIL,
                "last_checked": now, "key_owner": owner}
         others = other_super_users(admins, own_emails)
@@ -770,10 +789,14 @@ def main():
     for (host, org_id), entry in orgs.items():
         if entry["super"]:
             continue
+        access = "; ".join(f"{describe_privileges(p)}" + (f" [{o}]" if len(entry["access"]) > 1 else "")
+                           for o, p in entry["access"])
+        if entry.get("admin_list_refused"):
+            access = ("Org Admin - listed as Super User but Mist refuses its admin list (HTTP 403); "
+                      f"/self says: {access}")
         no_super_rows.append({
             "cloud": host, "org_id": org_id, "org_name": entry["name"],
-            "access": "; ".join(f"{describe_privileges(p)}" + (f" [{o}]" if len(entry["access"]) > 1 else "")
-                                for o, p in entry["access"]),
+            "access": access,
             "key_owner": ", ".join(dict.fromkeys(o for o, _ in entry["access"])),
             "last_checked": now,
         })
