@@ -85,6 +85,8 @@ HEADER_FONT = Font(bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="1F4E78")
 STATUS_FILLS = {
     "Would invite": PatternFill("solid", fgColor="E2EFDA"),
+    "Not added": PatternFill("solid", fgColor="FCE4D6"),
+    "Invite failed": PatternFill("solid", fgColor="FFC7CE"),
     "Invited": PatternFill("solid", fgColor="C6EFCE"),
     "Already admin": PatternFill("solid", fgColor="DDEBF7"),
     "Already invited": PatternFill("solid", fgColor="FFF2CC"),
@@ -132,6 +134,7 @@ INVITE_COLUMNS = [
     ("Org Name", "org_name"),
     ("Email", "email"),
     ("Status", "status"),
+    ("Not Added", "not_added"),
     ("Level", "level"),
     ("Delete Risk", "delete_risk"),
     ("Other Super Users", "other_supers"),
@@ -444,6 +447,14 @@ def msp_risk(host, org_id, entry, org_token, msp_keys, cache, own_emails):
         return {"delete_risk": MSP_OTHERS_RISK.format(msp=msp, n=len(others)), "msp": msp,
                 "msp_supers": ", ".join(others)}
     return {"delete_risk": MSP_NONE_RISK.format(msp=msp), "msp": msp, "msp_supers": "none"}
+
+
+def mark_not_added(rows, reason):
+    """Orgs that were due an invite but didn't get one still go in the
+    workbook, with the reason in the Not Added column."""
+    for r in rows:
+        r["status"] = "Not added"
+        r["not_added"] = reason
 
 
 def find_email(admins, email):
@@ -907,44 +918,82 @@ def main():
         print(f"Dry run - {len(to_invite)} invite(s) would be sent. Nothing sent.")
         return
 
-    # 4. Send the invites.
+    # 4. Send the invites - all at once, or with a y/n question for each org.
+    confirm_each = False
     if to_invite and not args.yes:
         if not interactive:
             sys.exit(f"\n{len(to_invite)} invite(s) to send - run with --yes to send without asking. "
                      f"Nothing sent, nothing written.")
-        answer = input(f"\nSend {len(to_invite)} Super Observer invite(s) to {INVITE_EMAIL}? [y/N] ")
-        if answer.strip().lower() not in ("y", "yes"):
+        print(f"\n{len(to_invite)} Super Observer invite(s) to send to {INVITE_EMAIL}:")
+        print("  a = add them all")
+        print("  c = confirm each one (a y/n question before every invite)")
+        print("  n = cancel, send nothing")
+        while True:
+            choice = input("Choice [a/c/N]: ").strip().lower()
+            if choice in ("a", "c", "n", ""):
+                break
+            print("  Please answer a, c or n.")
+        if choice in ("n", ""):
             print("Not sent.")
-            for r in to_invite:
-                r["status"] = "Not sent (cancelled)"
+            mark_not_added(to_invite, "cancelled - chose not to send any invites")
             to_invite = []
+        confirm_each = choice == "c"
+        if confirm_each:
+            print("For each org: y = invite, n = skip, a = invite this and all the rest, "
+                  "q = stop (send no more)")
 
     body = {"email": INVITE_EMAIL, "first_name": FIRST_NAME, "last_name": LAST_NAME,
             "hours": INVITE_HOURS, "privileges": [INVITE_PRIVILEGE]}
     for i, row in enumerate(to_invite, 1):
+        label = f"[{i}/{len(to_invite)}] {row['cloud']}  {row['org_name']}"
+        try:
+            if confirm_each:
+                print(f"\n  {label}  ({row['org_id']})")
+                if row.get("delete_risk"):
+                    print(f"      Delete Risk: {row['delete_risk']}")
+                while True:
+                    answer = input(f"  Invite {INVITE_EMAIL} to this org? [y/n/a/q]: ").strip().lower()
+                    if answer in ("y", "n", "a", "q"):
+                        break
+                    print("    Please answer y, n, a or q.")
+                if answer == "n":
+                    mark_not_added([row], "answered no")
+                    print("    skipped")
+                    continue
+                if answer == "q":
+                    mark_not_added(to_invite[i - 1:], "stopped (q) before this org")
+                    print("    stopped - no more invites will be sent")
+                    break
+                if answer == "a":
+                    confirm_each = False
+        except (KeyboardInterrupt, EOFError):
+            # Ctrl+C at a question: keep what was already sent in the workbook.
+            mark_not_added(to_invite[i - 1:], "stopped (Ctrl+C) before this org")
+            print("\n    stopped - no more invites will be sent")
+            break
         token = orgs[(row["cloud"], row["org_id"])]["super"][0][0]
-        print(f"  [{i}/{len(to_invite)}] inviting to {row['cloud']}  {row['org_name']} ... ", end="", flush=True)
+        print(f"  inviting: {label} ... ", end="", flush=True)
         try:
             api_call("POST", row["cloud"], token, f"/orgs/{row['org_id']}/invites", body=body)
         except ApiError as e:
             print("FAILED")
             failures.append((f"{row['cloud']} / {row['org_name']}", str(e)))
-            row["status"] = f"Invite failed: {e}"
+            row["status"] = "Invite failed"
+            row["not_added"] = f"invite failed: {e}"
             # Stop here - but record what was already sent.
-            for r in to_invite[i:]:
-                r["status"] = "Not sent (stopped after failure)"
+            mark_not_added(to_invite[i:], "stopped after an invite failed")
             break
         print("ok")
         row["status"] = "Invited"
         row["invited_on"] = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # Don't let unsent rows overwrite earlier history in the workbook.
-    save_rows = [r for r in invite_rows if not r["status"].startswith("Not sent")]
-    save_report(save_rows, no_super_rows, inventory_rows, licence_rows, checked_orgs, interactive)
+    save_report(invite_rows, no_super_rows, inventory_rows, licence_rows, checked_orgs, interactive)
     if failures:
         fail("An invite failed", failures, note="invites sent so far are recorded in the workbook")
     sent = sum(r["status"] == "Invited" for r in invite_rows)
-    print(f"Done - {sent} invite(s) sent to {INVITE_EMAIL}.")
+    not_added = sum(r["status"] == "Not added" for r in invite_rows)
+    print(f"Done - {sent} invite(s) sent to {INVITE_EMAIL}"
+          + (f", {not_added} not added (see the Not Added column)." if not_added else "."))
 
 
 if __name__ == "__main__":

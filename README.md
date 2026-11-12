@@ -57,7 +57,7 @@ dry run too, where orgs that would get an invite show *Would invite (dry run)*:
 
 | Sheet | Contents |
 |---|---|
-| Invitations | Cloud, Org ID, Org Name, Email, Status (Invited / Already admin / Already invited), Level, Delete Risk, Other Super Users, MSP, MSP Super Users, Invited On, Last Checked, Checked With |
+| Invitations | Cloud, Org ID, Org Name, Email, Status (Invited / Already admin / Already invited / Not added), Not Added (why no invite was sent), Level, Delete Risk, Other Super Users, MSP, MSP Super Users, Invited On, Last Checked, Checked With |
 | Not Super User | Cloud, Org ID, Org Name, Access Level, Key Owner, Last Checked |
 | Inventory to Release | One row per device in a sole-Super-User org: Type, Model, Serial, MAC, Name, Site, Connected, VC MAC. Replaced for each org on every run, so released devices drop off |
 | Licences to Remove | One row per subscription / evaluation / licence move in a sole-Super-User org: Kind, Status, Subscription ID, Type, Order ID, Quantity, Remaining, Start, End, Amendment ID. Replaced per org each run |
@@ -79,10 +79,21 @@ one cloud), and `invite_email`, `first_name`, `last_name` under `[settings]`.
 
 ```bash
 python3 mist_account_transfer.py --dry-run   # look only: writes the workbook, sends nothing
-python3 mist_account_transfer.py             # shows the list, asks before sending
-python3 mist_account_transfer.py --yes       # send without asking
+python3 mist_account_transfer.py             # shows the list, then asks: add all / confirm each / cancel
+python3 mist_account_transfer.py --yes       # add them all without asking
 python3 mist_account_transfer.py --ini ~/customer_x.ini --dry-run   # another settings file
 ```
+
+Before sending, the script asks how to add the invites:
+
+- `a` adds them all
+- `c` confirms each one: for every org it shows the org and its Delete Risk, then asks
+  `y` (invite), `n` (skip), `a` (invite this one and all the rest) or `q` (stop)
+- `n` (or Enter) cancels and sends nothing
+
+Orgs that don't get an invite are still written to the workbook, as *Not added*
+with the reason in the **Not Added** column (answered no, cancelled, stopped, or
+stopped after an invite failed).
 
 `--ini PATH` uses a different settings file instead of `mist_account_transfer.ini`
 next to the script. A relative `output_file` is then saved next to that ini, so
